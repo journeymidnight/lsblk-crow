@@ -12,7 +12,7 @@ pkg_check_modules(UDEV REQUIRED libudev)
 
 
 include_directories(include)
-add_executable(serve-blk src/server.cpp src/lsblk.cpp)
+add_executable(serve-blk src/server.cpp src/lsblk.cpp src/path.c)
 
 SET( CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -std=c++11" )
 

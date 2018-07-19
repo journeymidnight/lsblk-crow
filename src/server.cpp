@@ -1,6 +1,7 @@
 #include "crow.h"
 
 #include <sstream>
+#include "lsblk.h"
 
 class ExampleLogHandler : public crow::ILogHandler {
     public:
@@ -16,7 +17,6 @@ int main()
 
 
     CROW_ROUTE(app, "/")
-        .name("hello")
     ([]{
         return "Hello World!";
     });
