@@ -9,13 +9,15 @@ find_package(Boost 1.52 COMPONENTS system thread REQUIRED )
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(UDEV REQUIRED libudev)
+pkg_check_modules(MOUNT REQUIRED mount)
 
 
 include_directories(include)
 add_executable(serve-blk src/server.cpp src/lsblk.cpp src/path.c)
 
-SET( CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -std=c++11" )
+SET( CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -std=c++11 -g" )
 
 target_link_libraries(serve-blk ${Boost_LIBRARIES})
 target_link_libraries(serve-blk ${CMAKE_THREAD_LIBS_INIT})
 target_link_libraries(serve-blk ${UDEV_LIBRARIES})
+target_link_libraries(serve-blk ${MOUNT_LIBRARIES})

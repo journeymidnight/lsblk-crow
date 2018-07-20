@@ -5,6 +5,7 @@
 #include <crow.h>
 #include "path.h"
 #include <string.h>
+#include <libmount/libmount.h>
 
 
 /* SCSI device types.  Copied almost as-is from kernel header.
@@ -25,42 +26,314 @@
 #define SCSI_TYPE_OSD                   0x11
 #define SCSI_TYPE_NO_LUN                0x7f
 
+
+#define _PATH_SYS_DEVBLOCK "/sys/dev/block"
+#define _PATH_SYS_BLOCK        "/sys/block"
+
+
+void xfree(void * p){
+	if (p != NULL) {
+		free(p);
+	}
+}
+
+
 struct blkdev_cxt {
 	struct path_cxt *sysfs;
 	char *name;
-	int partition;
+	char *filename;
+	char *type;
+	char *fstype;
+	char *mountpoint;
+	int maj;
+	int min;
+	uint64_t size;
+	int nholders;
+	int nslaves;
+	int npartitions;
+	
+	//functions
+	void reset();
+	~blkdev_cxt();
 };
 
-
-const char *blkdev_scsi_type_to_name(int type);
-
-void list_blk() {
-	//read all the blocks;
-	//set_cxt
-	//get result to upper level;
+blkdev_cxt::~blkdev_cxt() {
+	this->reset();
 }
 
-static struct udev *udev = NULL;
+void blkdev_cxt::reset() {
+	xfree(name);
+	xfree(type);
+	xfree(fstype);
+	//xfree(mountpoint);
+	xfree(filename);
+	maj=0;
+	min=0;
+	size=0;
+	nholders = 0;
+	nslaves = 0;
+	npartitions = 0;
+	ul_unref_path(this->sysfs);
+	//reset all field to zero
+	memset(this, 0, sizeof(*this));
+}
+
+const char *blkdev_scsi_type_to_name(int type);
+static char *get_type(struct blkdev_cxt * cxt);
+static struct dirent *xreaddir(DIR *dp);
+static int set_cxt(struct blkdev_cxt *cxt, const char * name);
+static char * udev_fstype_info(struct blkdev_cxt * cxt); 
+
+static struct libmnt_table *mtab, *swaps;
+static struct libmnt_cache *mntcache;
+
+
+static int is_active_swap(const char *filename)
+{
+    if (!swaps) {
+        swaps = mnt_new_table();
+        if (!swaps)
+            return 0;
+        if (!mntcache)
+            mntcache = mnt_new_cache();
+
+        mnt_table_set_cache(swaps, mntcache);
+
+        mnt_table_parse_swaps(swaps, NULL);
+    }
+
+    return mnt_table_find_srcpath(swaps, filename, MNT_ITER_BACKWARD) != NULL;
+}
+
+static char *get_device_mountpoint(struct blkdev_cxt *cxt)
+{
+    struct libmnt_fs *fs;
+    const char *fsroot;
+
+    if (!mtab) {
+        mtab = mnt_new_table();
+        if (!mtab)
+            return NULL;
+        if (!mntcache)
+            mntcache = mnt_new_cache();
+
+        mnt_table_set_cache(mtab, mntcache);
+        mnt_table_parse_mtab(mtab, NULL);
+    }
+
+    /* Note that maj:min in /proc/self/mountinfo does not have to match with
+     * devno as returned by stat(), so we have to try devname too
+     */
+    fs = mnt_table_find_devno(mtab, makedev(cxt->maj, cxt->min), MNT_ITER_BACKWARD);
+    if (!fs)
+        fs = mnt_table_find_srcpath(mtab, cxt->filename, MNT_ITER_BACKWARD);
+    if (!fs)
+        return is_active_swap(cxt->filename) ? strdup("[SWAP]") : NULL;
+
+    /* found */
+    fsroot = mnt_fs_get_root(fs);
+    if (fsroot && strcmp(fsroot, "/") != 0) {
+        /* hmm.. we found bind mount or btrfs subvolume, let's try to
+         * get real FS root mountpoint */
+        struct libmnt_fs *rfs;
+        struct libmnt_iter *itr = mnt_new_iter(MNT_ITER_BACKWARD);
+
+        mnt_table_set_iter(mtab, itr, fs);
+        while (mnt_table_next_fs(mtab, itr, &rfs) == 0) {
+            fsroot = mnt_fs_get_root(rfs);
+            if ((!fsroot || strcmp(fsroot, "/") == 0)
+                && mnt_fs_match_source(rfs, cxt->filename, mntcache)) {
+                fs = rfs;
+                break;
+            }
+        }
+        mnt_free_iter(itr);
+    }
+
+    return strdup(mnt_fs_get_target(fs));
+}
+
+int sysfs_blkdev_is_partition_dirent(DIR *dir, struct dirent *d, const char *parent_name)
+{
+    char path[255 + 6 + 1];
+
+#ifdef _DIRENT_HAVE_D_TYPE
+    if (d->d_type != DT_DIR &&
+        d->d_type != DT_LNK &&
+        d->d_type != DT_UNKNOWN)
+        return 0;
+#endif
+    if (parent_name) {
+        const char *p = parent_name;
+        size_t len;
+
+        /* /dev/sda --> "sda" */
+        if (*parent_name == '/') {
+            p = strrchr(parent_name, '/');
+            if (!p)
+                return 0;
+            p++;
+        }
+
+        len = strlen(p);
+        if (strlen(d->d_name) <= len)
+            return 0;
+
+        /* partitions subdir name is
+         *    "<parent>[:digit:]" or "<parent>p[:digit:]"
+         */
+        return strncmp(p, d->d_name, len) == 0 &&
+               ((*(d->d_name + len) == 'p' && isdigit(*(d->d_name + len + 1)))
+            || isdigit(*(d->d_name + len)));
+    }
+
+    /* Cannot use /partition file, not supported on old sysfs */
+    snprintf(path, sizeof(path), "%s/start", d->d_name);
+
+    return faccessat(dirfd(dir), path, R_OK, 0) == 0;
+}
+
+static int sysfs_blkdev_count_partitions(struct path_cxt *pc, const char *devname)
+{
+    DIR *dir;
+    struct dirent *d;
+    int r = 0;
+
+    dir = ul_path_opendir(pc, NULL);
+    if (!dir)
+        return 0;
+
+    while ((d = xreaddir(dir))) {
+        if (sysfs_blkdev_is_partition_dirent(dir, d, devname))
+            r++;
+    }
+
+    closedir(dir);
+    return r;
+}
+
+static struct dirent *xreaddir(DIR *dp)
+{
+    struct dirent *d;
+
+    assert(dp);
+
+    while ((d = readdir(dp))) {
+        if (!strcmp(d->d_name, ".") ||
+            !strcmp(d->d_name, ".."))
+            continue;
+
+        /* blacklist here? */
+        break;
+    }
+    return d;
+}
+
+void list_blk(crow::json::wvalue &json_result) {
+	//read all the blocks;
+	DIR *dir;
+	struct dirent *d;
+        struct blkdev_cxt cxt = { NULL };
+	struct path_cxt *pc = ul_new_path(_PATH_SYS_BLOCK);
+	//set_cxt
+	//get result to upper level;
+	dir = ul_path_opendir(pc, NULL);
+	int i = 0;
+        while ((d = xreaddir(dir))) {
+		set_cxt(&cxt, d->d_name);
+		json_result[i]["name"] = cxt.name;
+		json_result[i]["type"] = cxt.type;
+		json_result[i]["npartitions"] = cxt.npartitions;
+		json_result[i]["fstype"] = cxt.fstype;
+		json_result[i]["mountpoint"] = cxt.mountpoint;
+		cxt.reset();
+		i ++;
+	}
+
+        closedir(dir);
+	ul_unref_path(pc);
+}
+
 
 static int is_dm(const char *name)
 {
         return strncmp(name, "dm-", 3) ? 0 : 1;
 }
 
-int udev_info(struct blkdev_cxt * cxt) 
+static dev_t devname_to_devno(const char * name){
+	char * buf = NULL;
+	int dev = -1;
+	struct stat st;
+	asprintf(&buf, "/dev/%s", name);
+	stat(buf, &st);
+	dev = st.st_rdev;
+	free(buf);
+	return dev;
+}
+
+
+static struct path_cxt * new_sysfs_path(dev_t devno) {
+    struct path_cxt *pc = ul_new_path(NULL);
+    if (!pc)
+	return NULL;
+    char buf[sizeof(_PATH_SYS_DEVBLOCK)
+         + sizeof(stringify_value(UINT32_MAX)) * 2
+         + 3];
+
+    snprintf(buf, sizeof(buf), _PATH_SYS_DEVBLOCK "/%d:%d", major(devno), minor(devno));
+
+    int rc = ul_path_set_dir(pc, buf);
+    if (rc)
+        return NULL; 
+    rc = ul_path_get_dirfd(pc);
+    if (rc < 0)
+        return NULL;
+    return pc;
+    
+
+}
+
+static int set_cxt(struct blkdev_cxt *cxt, const char * name) {
+	cxt->name = strdup(name);
+	dev_t devno = devname_to_devno(name);
+	cxt->maj = major(devno);
+	cxt->min = minor(devno);
+	cxt->sysfs = new_sysfs_path(devno);
+	cxt->fstype = udev_fstype_info(cxt);
+	char * filename;
+	asprintf(&filename, "/dev/%s", name);
+
+
+
+	cxt->type = get_type(cxt);
+	cxt->filename = filename;
+        cxt->nholders = ul_path_count_dirents(cxt->sysfs, "holders");
+        cxt->nslaves = ul_path_count_dirents(cxt->sysfs, "slaves");
+        cxt->npartitions = sysfs_blkdev_count_partitions(cxt->sysfs, cxt->name);
+	cxt->mountpoint = get_device_mountpoint(cxt);
+	if(cxt->mountpoint == NULL){
+		cxt->mountpoint = strdup("none");
+	}
+}
+
+
+
+static struct udev *udev = NULL;
+static char * udev_fstype_info(struct blkdev_cxt * cxt) 
 {
 	struct udev_device *dev = NULL;
+	char * d;
 	
 	if (!udev)
 		udev = udev_new();
 	dev = udev_device_new_from_subsystem_sysname(udev, "block", cxt->name);
 	const char * data = udev_device_get_property_value(dev, "ID_FS_TYPE");
-	std::string s;
-	if (data)
-		s = data;
-	CROW_LOG_INFO << "ID_FS_TYPE:" << s;
+	if(data)
+		d = strdup(data);
+	else 	
+		d = strdup("none");
 	udev_device_unref(dev);
-
+	return d;
 }
 
 
@@ -109,7 +382,7 @@ static char *get_type(struct blkdev_cxt * cxt)
         if (ul_path_read_s32(cxt->sysfs, &x, "device/type") == 0)
             type = blkdev_scsi_type_to_name(x);
         if (!type)
-            type = cxt->partition ? "part" : "disk";
+            type = "disk";
         res = strdup(type);
     }
 

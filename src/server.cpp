@@ -16,21 +16,13 @@ int main()
     crow::SimpleApp app;
 
 
-    CROW_ROUTE(app, "/")
+    CROW_ROUTE(app, "/lsblk")
     ([]{
-        return "Hello World!";
+	crow::json::wvalue y;
+	list_blk(y);
+        return crow::json::dump(y);
     });
 
-    CROW_ROUTE(app, "/about")
-    ([](){
-        return "About Crow example.";
-    });
-
-    // a request to /path should be forwarded to /path/
-    CROW_ROUTE(app, "/path/")
-    ([](){
-        return "Trailing slash test case..";
-    });
 
 
     // simple json response
@@ -71,7 +63,7 @@ int main()
     });
 
     // enables all log
-    app.loglevel(crow::LogLevel::DEBUG);
+    app.loglevel(crow::LogLevel::INFO);
     //crow::logger::setHandler(std::make_shared<ExampleLogHandler>());
 
     app.port(18080)
