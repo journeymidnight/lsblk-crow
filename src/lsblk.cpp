@@ -65,14 +65,9 @@ void blkdev_cxt::reset() {
 	xfree(name);
 	xfree(type);
 	xfree(fstype);
-	//xfree(mountpoint);
+	xfree(mountpoint);
+
 	xfree(filename);
-	maj=0;
-	min=0;
-	size=0;
-	nholders = 0;
-	nslaves = 0;
-	npartitions = 0;
 	ul_unref_path(this->sysfs);
 	//reset all field to zero
 	memset(this, 0, sizeof(*this));
@@ -246,6 +241,7 @@ void list_blk(crow::json::wvalue &json_result) {
 		json_result[i]["npartitions"] = cxt.npartitions;
 		json_result[i]["fstype"] = cxt.fstype;
 		json_result[i]["mountpoint"] = cxt.mountpoint;
+		json_result[i]["size"] = cxt.size;
 		cxt.reset();
 		i ++;
 	}
@@ -314,6 +310,8 @@ static int set_cxt(struct blkdev_cxt *cxt, const char * name) {
 	if(cxt->mountpoint == NULL){
 		cxt->mountpoint = strdup("none");
 	}
+        if (ul_path_read_u64(cxt->sysfs, &cxt->size, "size") == 0)/* in sectors */
+        	cxt->size <<= 9;
 }
 
 
