@@ -1,0 +1,18 @@
+[Unit]
+Description=serve-blk
+After=network.target
+
+[Service]
+LimitAS=infinity
+LimitRSS=infinity
+LimitCORE=infinity
+LimitNOFILE=65535
+Type=simple
+ExecStart=/usr/bin/serve-blk
+ExecStop=/usr/bin/kill $MAINPID
+Restart=always
+RestartSec=30s
+User=root
+
+[Install]
+WantedBy=multi-user.target
