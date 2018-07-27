@@ -224,6 +224,36 @@ static struct dirent *xreaddir(DIR *dp)
     return d;
 }
 
+static bool is_sys_disk(struct blkdev_cxt *cxt) {
+        DIR *dir;
+        struct dirent *d;
+        struct blkdev_cxt part_cxt = { NULL };
+        if (cxt->npartitions == 0) {
+                if (!strcmp(cxt->mountpoint, "/")) {
+                        return true;
+                }
+                return false;
+        }
+  
+        bool sys_disk = false;
+        dir = ul_path_opendir(cxt->sysfs, NULL);
+        if (!dir) {
+                return false;
+        }
+        while ((d = xreaddir(dir))) {
+                if (!(sysfs_blkdev_is_partition_dirent(dir, d, cxt->name)))
+                       continue;
+
+                set_cxt(&part_cxt, d->d_name);
+                if (!strcmp(part_cxt.mountpoint, "/")) {
+                        sys_disk = true;
+                }
+                part_cxt.reset();
+        }
+        closedir(dir);
+        return sys_disk;
+}
+
 void list_blk(crow::json::wvalue &json_result) {
 	//read all the blocks;
 	DIR *dir;
@@ -236,6 +266,9 @@ void list_blk(crow::json::wvalue &json_result) {
 	int i = 0;
         while ((d = xreaddir(dir))) {
 		set_cxt(&cxt, d->d_name);
+                if (is_sys_disk(&cxt)) {
+                        continue;
+                }
 		json_result[i]["name"] = cxt.name;
 		json_result[i]["type"] = cxt.type;
 		json_result[i]["npartitions"] = cxt.npartitions;
