@@ -52,6 +52,7 @@ struct blkdev_cxt {
 	int nslaves;
 	int npartitions;
         int partition;
+        int cephmount;
 	
 	//functions
 	void reset();
@@ -269,6 +270,15 @@ static bool has_sys_mount(struct blkdev_cxt *cxt)
         }
         return false;
 }
+static bool has_ceph_mount(struct blkdev_cxt *cxt)
+{
+        if (strstr(cxt->mountpoint, "ceph"))
+        {
+                return true;
+        }
+        return false;
+}
+
 static bool find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_name);
 static bool find_deps(struct blkdev_cxt *cxt);
 
@@ -281,6 +291,9 @@ static bool find_blkdev(struct blkdev_cxt *cxt, int do_partitions, const char *p
         } else  {
                 if (has_sys_mount(cxt)) {
                         return true;
+                }
+                if (has_ceph_mount(cxt)) {
+                        cxt->cephmount = 1;
                 }
         }
 
@@ -314,7 +327,15 @@ static bool find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_n
                         closedir(dir);
                         return true;
                 }
-                if (find_blkdev(&part_cxt, 0, NULL)) {
+                if (has_ceph_mount(wholedisk_cxt)) {
+                        wholedisk_cxt->cephmount = 1;
+                }
+                bool ret;
+                ret = find_blkdev(&part_cxt, 0, NULL);
+                if (part_cxt.cephmount) {
+                        wholedisk_cxt->cephmount = 1;
+                }
+                if (ret) {
                         part_cxt.reset();
                         closedir(dir);
                         return true;
@@ -388,6 +409,7 @@ void list_blk(crow::json::wvalue &json_result) {
 		json_result[i]["fstype"] = cxt.fstype;
 		json_result[i]["mountpoint"] = cxt.mountpoint;
 		json_result[i]["size"] = cxt.size;
+                json_result[i]["cephmount"] = cxt.cephmount;
 		cxt.reset();
 		i ++;
 	}
@@ -459,6 +481,7 @@ static int set_cxt(struct blkdev_cxt *cxt, struct blkdev_cxt *wholedisk, const c
 	}
         if (ul_path_read_u64(cxt->sysfs, &cxt->size, "size") == 0)/* in sectors */
         	cxt->size <<= 9;
+        cxt->cephmount = 0;
         return 0;
 }
 
