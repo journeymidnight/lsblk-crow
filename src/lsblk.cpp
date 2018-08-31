@@ -84,6 +84,28 @@ static char * udev_fstype_info(struct blkdev_cxt * cxt);
 static struct libmnt_table *mtab, *swaps;
 static struct libmnt_cache *mntcache;
 
+// copy from libmount
+void mnt_unref_table(struct libmnt_table *tb)
+{
+    if (tb) {
+        //tb->refcount--;
+        /*DBG(FS, ul_debugobj(tb, "unref=%d", tb->refcount));*/
+        mnt_free_table(tb);
+    }
+}
+
+// copy from libmount
+void mnt_unref_cache(struct libmnt_cache *cache)
+{
+    if (cache) {
+        //cache->refcount--;
+        /*DBG(CACHE, ul_debugobj(cache, "unref=%d", cache->refcount));*/
+        //mnt_unref_table(cache->mtab);
+
+        mnt_free_cache(cache);
+    }
+}
+
 
 static int is_active_swap(const char *filename)
 {
@@ -394,6 +416,9 @@ void list_blk(crow::json::wvalue &json_result) {
 	struct dirent *d;
         struct blkdev_cxt cxt = { NULL };
 	struct path_cxt *pc = ul_new_path(_PATH_SYS_BLOCK);
+    mtab = NULL;
+    swaps = NULL;
+    mntcache = NULL;
 	//set_cxt
 	//get result to upper level;
 	dir = ul_path_opendir(pc, NULL);
@@ -414,8 +439,11 @@ void list_blk(crow::json::wvalue &json_result) {
 		i ++;
 	}
 
-        closedir(dir);
+    closedir(dir);
 	ul_unref_path(pc);
+    mnt_unref_table(mtab);
+    mnt_unref_table(swaps);
+    mnt_unref_cache(mntcache);
 }
 
 
