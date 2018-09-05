@@ -30,6 +30,9 @@
 #define _PATH_SYS_DEVBLOCK "/sys/dev/block"
 #define _PATH_SYS_BLOCK        "/sys/block"
 
+#define ERR_DEV_NO         -2
+#define ERR_SYS_DISK       -3
+#define ERR_CEPH_DISK      -4
 
 void xfree(void * p){
 	if (p != NULL) {
@@ -88,8 +91,6 @@ static struct libmnt_cache *mntcache;
 void mnt_unref_table(struct libmnt_table *tb)
 {
     if (tb) {
-        //tb->refcount--;
-        /*DBG(FS, ul_debugobj(tb, "unref=%d", tb->refcount));*/
         mnt_free_table(tb);
     }
 }
@@ -98,10 +99,6 @@ void mnt_unref_table(struct libmnt_table *tb)
 void mnt_unref_cache(struct libmnt_cache *cache)
 {
     if (cache) {
-        //cache->refcount--;
-        /*DBG(CACHE, ul_debugobj(cache, "unref=%d", cache->refcount));*/
-        //mnt_unref_table(cache->mtab);
-
         mnt_free_cache(cache);
     }
 }
@@ -283,36 +280,36 @@ static const char* sys_mount_dir[] = {
         "/mnt"
 };
 
-static bool has_sys_mount(struct blkdev_cxt *cxt)
+static int has_sys_mount(struct blkdev_cxt *cxt)
 {
         for (int i = 0; i < sizeof(sys_mount_dir)/sizeof(sys_mount_dir[0]); i++) {
                 if (!strcmp(cxt->mountpoint, sys_mount_dir[i])) {
-                        return true;
+                        return ERR_CEPH_DISK;
                 }
         }
-        return false;
+        return 0;
 }
-static bool has_ceph_mount(struct blkdev_cxt *cxt)
+static int has_ceph_mount(struct blkdev_cxt *cxt)
 {
-        if (strstr(cxt->mountpoint, "ceph"))
-        {
-                return true;
+        if (strstr(cxt->mountpoint, "ceph")){
+                return ERR_SYS_DISK;
         }
-        return false;
+        return 0;
 }
 
-static bool find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_name);
-static bool find_deps(struct blkdev_cxt *cxt);
+static int  find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_name);
+static int  find_deps(struct blkdev_cxt *cxt);
 
-static bool find_blkdev(struct blkdev_cxt *cxt, int do_partitions, const char *part_name)
+static int scan_blkdev(struct blkdev_cxt *cxt, int do_partitions, const char *part_name)
 {
         if (do_partitions && cxt->npartitions) {
-                if (find_partitions(cxt, part_name)) {        /* partitions + whole-disk */
-                        return true;
+                int ret = find_partitions(cxt, part_name);
+                if (ret != 0) {        /* partitions + whole-disk */
+                        return ret;
                 }
         } else  {
                 if (has_sys_mount(cxt)) {
-                        return true;
+                        return ERR_CEPH_DISK;
                 }
                 if (has_ceph_mount(cxt)) {
                         cxt->cephmount = 1;
@@ -322,18 +319,18 @@ static bool find_blkdev(struct blkdev_cxt *cxt, int do_partitions, const char *p
         return find_deps(cxt);
 }
 
-static bool find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_name)
+static int find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_name)
 {
         DIR *dir;
         struct dirent *d;
         struct blkdev_cxt part_cxt = {NULL};
         
         if (!wholedisk_cxt->npartitions)
-                return false;
+                return 0;
 
         dir = ul_path_opendir(wholedisk_cxt->sysfs, NULL);
         if (!dir) {
-                return false;
+                return 0;
         }
 
         while ((d = xreaddir(dir)))
@@ -343,70 +340,80 @@ static bool find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_n
                 if (!(sysfs_blkdev_is_partition_dirent(dir, d, wholedisk_cxt->name)))
                         continue;
 
-                set_cxt(&part_cxt, wholedisk_cxt, d->d_name);
+                int ret;
+                ret = set_cxt(&part_cxt, wholedisk_cxt, d->d_name);
+                if (ret != 0) {
+                        return ret;
+                }
                 if (has_sys_mount(wholedisk_cxt)) {
                         part_cxt.reset();
                         closedir(dir);
-                        return true;
+                        return ERR_CEPH_DISK;
                 }
                 if (has_ceph_mount(wholedisk_cxt)) {
                         wholedisk_cxt->cephmount = 1;
                 }
-                bool ret;
-                ret = find_blkdev(&part_cxt, 0, NULL);
+                ret = scan_blkdev(&part_cxt, 0, NULL);
                 if (part_cxt.cephmount) {
                         wholedisk_cxt->cephmount = 1;
                 }
                 if (ret) {
                         part_cxt.reset();
                         closedir(dir);
-                        return true;
+                        return ret;
                 }
 
                 part_cxt.reset();
         }
 
         closedir(dir);
-        return false;
+        return 0;
 }
 
-static bool find_deps(struct blkdev_cxt *cxt)
+static int  find_deps(struct blkdev_cxt *cxt)
 {
         DIR *dir;
         struct dirent *d;
         struct blkdev_cxt dep = { NULL };
 
         if (!cxt->nholders)
-                return false;
+                return 0;
         
         dir = ul_path_opendir(cxt->sysfs, "holders");
         if (!dir)
-                return false;
+                return 0;
 
         while ((d = xreaddir(dir))) {
                 /* Is the dependency a partition? */
                 if (sysfs_blkdev_is_partition_dirent(dir, d, NULL)) {
                         if (!get_wholedisk_from_partition_dirent(dir, d, &dep)) {
-                                if (find_blkdev(&dep, 1, d->d_name)) {
+                                int ret = scan_blkdev(&dep, 1, d->d_name);
+                                if (ret != 0) {
                                         dep.reset();
                                         closedir(dir);
-                                        return true;
+                                        return ret;
                                 }
                         }
                 }
                 /* The dependency is a whole device. */
-                else if (!set_cxt(&dep, NULL, d->d_name)) {
-                        if (find_blkdev(&dep, 1, NULL)) {
+                else {
+                    int ret = set_cxt(&dep, NULL, d->d_name);
+                    if (!ret) {
+                        int ret = scan_blkdev(&dep, 1, NULL);
+                        if (ret != 0) {
                                 dep.reset();
                                 closedir(dir);
-                                return true;
+                                return ret;
                         }
+                    } else {
+                        return ret;
+                    }
                 }
                 dep.reset();
         }
         closedir(dir);
 
-    return false;
+    return 0;
 }
 
 
@@ -423,11 +430,14 @@ void list_blk(crow::json::wvalue &json_result) {
 	//get result to upper level;
 	dir = ul_path_opendir(pc, NULL);
 	int i = 0;
-        while ((d = xreaddir(dir))) {
-		set_cxt(&cxt, NULL, d->d_name);
-                if (find_blkdev(&cxt, 1, NULL)) {
-                        continue;
-                }
+    while ((d = xreaddir(dir))) {
+		int ret = set_cxt(&cxt, NULL, d->d_name);
+        if (ret != 0) {
+            continue;
+        } 
+        if (scan_blkdev(&cxt, 1, NULL)) {
+            continue;
+        }
 		json_result[i]["name"] = cxt.name;
 		json_result[i]["type"] = cxt.type;
 		json_result[i]["npartitions"] = cxt.npartitions;
@@ -456,6 +466,7 @@ static dev_t devname_to_devno(const char * name){
 	char * buf = NULL;
 	int dev = -1;
 	struct stat st;
+    memset(&st, 0, sizeof(st));
 	asprintf(&buf, "/dev/%s", name);
 	stat(buf, &st);
 	dev = st.st_rdev;
@@ -488,6 +499,9 @@ static struct path_cxt * new_sysfs_path(dev_t devno) {
 static int set_cxt(struct blkdev_cxt *cxt, struct blkdev_cxt *wholedisk, const char * name) {
 	cxt->name = strdup(name);
 	dev_t devno = devname_to_devno(name);
+    if (uint(devno) == 0) {
+        return ERR_DEV_NO;
+    }
 	cxt->maj = major(devno);
 	cxt->min = minor(devno);
 	cxt->sysfs = new_sysfs_path(devno);

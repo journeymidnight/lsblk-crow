@@ -1,6 +1,7 @@
 #include "crow.h"
 
 #include <sstream>
+#include <mutex>
 #include "lsblk.h"
 
 class ExampleLogHandler : public crow::ILogHandler {
@@ -18,8 +19,11 @@ int main()
 
     CROW_ROUTE(app, "/lsblk")
     ([]{
-	crow::json::wvalue y;
-	list_blk(y);
+	    crow::json::wvalue y;
+        std::mutex mtx;
+        mtx.lock();
+	    list_blk(y);
+        mtx.unlock();
         return crow::json::dump(y);
     });
 
