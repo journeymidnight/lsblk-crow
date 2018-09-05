@@ -284,7 +284,7 @@ static int has_sys_mount(struct blkdev_cxt *cxt)
 {
         for (int i = 0; i < sizeof(sys_mount_dir)/sizeof(sys_mount_dir[0]); i++) {
                 if (!strcmp(cxt->mountpoint, sys_mount_dir[i])) {
-                        return ERR_CEPH_DISK;
+                        return ERR_SYS_DISK;
                 }
         }
         return 0;
@@ -292,7 +292,7 @@ static int has_sys_mount(struct blkdev_cxt *cxt)
 static int has_ceph_mount(struct blkdev_cxt *cxt)
 {
         if (strstr(cxt->mountpoint, "ceph")){
-                return ERR_SYS_DISK;
+                return ERR_CEPH_DISK;
         }
         return 0;
 }
@@ -309,7 +309,7 @@ static int scan_blkdev(struct blkdev_cxt *cxt, int do_partitions, const char *pa
                 }
         } else  {
                 if (has_sys_mount(cxt)) {
-                        return ERR_CEPH_DISK;
+                        return ERR_SYS_DISK;
                 }
                 if (has_ceph_mount(cxt)) {
                         cxt->cephmount = 1;
@@ -348,7 +348,7 @@ static int find_partitions(struct blkdev_cxt *wholedisk_cxt, const char *part_na
                 if (has_sys_mount(wholedisk_cxt)) {
                         part_cxt.reset();
                         closedir(dir);
-                        return ERR_CEPH_DISK;
+                        return ERR_SYS_DISK;
                 }
                 if (has_ceph_mount(wholedisk_cxt)) {
                         wholedisk_cxt->cephmount = 1;
