@@ -406,6 +406,8 @@ static int  find_deps(struct blkdev_cxt *cxt)
                                 return ret;
                         }
                     } else {
+			dep.reset();
+			closedir(dir);
                         return ret;
                     }
                 }
